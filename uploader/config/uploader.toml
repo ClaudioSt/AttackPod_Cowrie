@@ -1,8 +1,0 @@
-collector_url = "http://host.docker.internal:8000/api"
-batch_max_bytes = 5242880
-batch_max_events = 1000
-batch_max_seconds = 3
-tls_ca_path = "/etc/ssl/certs/ca-certificates.crt"
-source_log = "/cowrie/log/cowrie.json"
-client_cert_path = ""
-client_key_path = ""

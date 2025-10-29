@@ -1,9 +1,0 @@
-[project]
-name = "honeynet-uploader"
-version = "0.1.0"
-dependencies = [
-  "requests>=2.32.0",
-  "watchfiles>=0.22.0",   # robustes File-Tailing
-  "orjson>=3.10.7",
-  "pydantic>=2.8.2",
-]

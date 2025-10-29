@@ -1,1 +1,0 @@
-# username:password[:uid[:gid[:home[:shell]]]]

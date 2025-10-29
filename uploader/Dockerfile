@@ -1,18 +1,12 @@
-# uploader/Dockerfile
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/uploader
+COPY uploader.py /opt/uploader/uploader.py
+COPY entrypoint.sh /opt/uploader/entrypoint.sh
+COPY healthcheck.py /opt/healthcheck.py
 
-WORKDIR /app
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir requests python-dateutil
 
-# wichtig:
-COPY uploader/ /app/uploader/
+RUN chmod +x /opt/uploader/entrypoint.sh
 
-
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
-CMD ["python", "-m", "uploader.main"]
-
+ENTRYPOINT ["/opt/uploader/entrypoint.sh"]

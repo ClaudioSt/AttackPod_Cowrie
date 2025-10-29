@@ -1,9 +1,0 @@
-requests>=2.32.0
-watchfiles>=0.22.0     # robustes File-Tailing (statt tail -f)
-orjson>=3.10.7         # superschnell für JSON (Ein/Ausgabe)
-pydantic>=2.8.2        # Validierung und Config-Parsing
-loguru>=0.7.2           # schöneres Logging
-tenacity>=8.4.2         # sauberes Retry-Handling (statt eigener backoff-loop)
-watchdog>=4.0.1
-scapy>=2.5.0
-dateparser
