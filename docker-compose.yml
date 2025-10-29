@@ -64,9 +64,15 @@ services:
     environment:
       - OUT_DIR=/data/out
       - PCAP_DIR=/data/pcap
-      # ❗️Extractor soll das echte cowrie.json lesen:
       - COWRIE_JSON=/cowrie/cowrie-git/var/log/cowrie/cowrie.json
       - SENSOR_ID=${SENSOR_ID}
+    command: ["python", "/opt/extractor.py",
+              "--pcap-dir","/data/pcap",
+              "--cowrie-json","/cowrie/cowrie-git/var/log/cowrie/cowrie.json",
+              "--out-dir","/data/out",
+              "--sensor-id","${SENSOR_ID}",
+              "--ssh-port","2222",
+              "--scan-interval","10"]
     healthcheck:
       # einfache Datei-Existenzprüfung wäre sinnvoller, aber wir lassen dein HC so stehen
       test: ["CMD", "python", "/opt/healthcheck.py", "127.0.0.1", "1"]
