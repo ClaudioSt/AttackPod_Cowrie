@@ -147,25 +147,6 @@ Content-Type: application/x-ndjson
 | `client_banner` / `server_banner` | SSH-Versionsstrings erkannt im Payload            |
 | `hassh`                           | Hash über KEX/Algorithmuslisten (SSH Fingerprint) |
 
----
-
-## 🧩 Troubleshooting
-
-| Problem                                                | Ursache / Lösung                                                   |
-| ------------------------------------------------------ | ------------------------------------------------------------------ |
-| `Read-only file system`                                | Volume wurde mit falschen Rechten eingebunden → `:rw` Mount prüfen |
-| `No such file or directory: '/cowrie/log/cowrie.json'` | Volume-Pfad oder Mapping in `docker-compose.yml` prüfen            |
-| `Extractor unhealthy`                                  | Leere oder korrupte `.pcap`-Dateien → ggf. alte Volumes löschen    |
-| `pcap-capture conflict`                                | Vorherige Container-Instanz entfernen: `docker rm -f pcap-capture` |
-
----
-
-## 🧹 Cleanup
-
-```bash
-# Alle Container, Netzwerke, Volumes löschen
-docker compose down -v --remove-orphans
-```
 
 ---
 
