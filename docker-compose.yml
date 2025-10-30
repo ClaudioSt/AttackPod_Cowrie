@@ -42,7 +42,7 @@ services:
       SENSOR_ID: honeypot-01
     volumes:
       - ./extractor/extractor.py:/opt/extractor/extractor.py:ro
-      - ./extractor/trigger.py:/app/trigger.py:ro
+      - ./extractor/entrypoint.sh:/app/entrypoint.sh:ro
       - ./data/pcap:/data/pcap:ro
       - ./data/out:/data/out
       - ./cowrie/log:/cowrie/log:ro
@@ -71,6 +71,7 @@ services:
     volumes:
       - ./extractor/extractor.py:/opt/extractor/extractor.py:ro
       - ./extractor/entrypoint.sh:/app/entrypoint.sh:ro
+      - ./extractor/trigger.py:/app/trigger.py:ro       
       - ./data/pcap:/data/pcap:ro
       - ./data/out:/data/out
       - ./cowrie/log:/cowrie/log:ro
@@ -80,21 +81,26 @@ services:
     networks: [honeynet]
     restart: unless-stopped
 
-  uploader:
-    build:
-      context: ./uploader
-    container_name: uploader
-    environment:
-      API_KEY: ${API_KEY}
-      COLLECTOR_URL: http://host.docker.internal:8000/add_attack   # uploader
-      SEND_URL: http://host.docker.internal:8000/add_attack 
-      COWRIE_JSON: /cowrie/log/cowrie.json
-    volumes:
-      - ./cowrie/log:/cowrie/log:ro
-    depends_on:
-      - cowrie
-    networks: [honeynet]
+  web:
+    image: caddy:2-alpine
+    container_name: honeynet-web
     restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    volumes:
+      - ./web/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/out:/srv/data:ro
+      - ./web/index.html:/srv/index.html:ro
+    environment:
+      ENABLE_WEB: ${ENABLE_WEB}
+    entrypoint:  >
+      sh -lc '
+        if [ "${ENABLE_WEB}" = "1" ]; then
+          exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile;
+        else
+          echo "ENABLE_WEB != 1 -> skipping web service" && sleep infinity;
+        fi
+      '
 
 networks:
   honeynet:

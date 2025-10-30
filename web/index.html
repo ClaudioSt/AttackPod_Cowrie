@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Honeynet Session Viewer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #fafafa; margin: 0; }
+    header { background: #333; color: #fff; padding: 10px 20px; }
+    main { padding: 20px; }
+    h1 { margin: 0; }
+    pre { background: #eee; padding: 10px; border-radius: 8px; overflow-x: auto; }
+    .file { margin-bottom: 1em; }
+    button { margin-right: 5px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🐝 Honeynet Session Viewer</h1>
+  </header>
+  <main>
+    <p>Verfügbare Sessions:</p>
+    <ul id="file-list"></ul>
+    <hr>
+    <div id="content"></div>
+  </main>
+
+  <script>
+    async function listFiles() {
+      const resp = await fetch('/api/data/');
+      const text = await resp.text();
+      const files = [...text.matchAll(/href="([^"]+\.json)"/g)].map(m => m[1]);
+      const ul = document.getElementById('file-list');
+      ul.innerHTML = '';
+      files.forEach(f => {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.textContent = f;
+        btn.onclick = () => loadFile(f);
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+    }
+
+    async function loadFile(name) {
+      const resp = await fetch(`/api/data/${name}`);
+      const json = await resp.json();
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(json, null, 2);
+      const content = document.getElementById('content');
+      content.innerHTML = '';
+      content.appendChild(pre);
+    }
+
+    listFiles();
+  </script>
+</body>
+</html>

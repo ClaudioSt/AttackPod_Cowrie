@@ -1,0 +1,11 @@
+:80
+
+root * /srv
+file_server browse
+
+# Explizite JSON-Auslieferung als text/json, nicht application/octet-stream
+@jsonfiles {
+    path *.json
+}
+
+header @jsonfiles Content-Type application/json
