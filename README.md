@@ -54,7 +54,7 @@ Ein modulares Honeypot-System basierend auf **Cowrie**, das SSH-Angriffe überwa
 
 ```bash
 # Repository klonen
-git clone <repo-url>
+git clone https://github.com/ClaudioSt/AttackPod_Cowrie.git
 cd AttackPod_Cowrie
 
 # Container bauen und starten
@@ -97,7 +97,7 @@ Nach kurzer Zeit sollte der **Collector Mock** Daten empfangen, z. B.:
 ```json
 {
   "eventid": "cowrie.login.failed",
-  "username": "admin",
+  "username": "root",
   "password": "123456",
   "src_ip": "172.18.0.1",
   "timestamp": "2025-10-30T00:54:49.537391Z"
