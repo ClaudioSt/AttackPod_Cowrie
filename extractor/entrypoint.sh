@@ -10,4 +10,4 @@ exec python /opt/extractor/extractor.py \
   --pcap-dir "${PCAP_DIR:-/data/pcap}" \
   --cowrie-json "${COWRIE_JSON:-/cowrie/log/cowrie.json}" \
   --out-dir "${OUT_DIR:-/data/out}" \
-  --sensor-id "${SENSOR_ID:-unknown}"
+  --sensor-id "${SENSOR_ID:-honeypot-01}"

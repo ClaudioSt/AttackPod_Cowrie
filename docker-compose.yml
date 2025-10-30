@@ -1,117 +1,101 @@
 services:
   cowrie:
-    image: cowrie/cowrie:2.8.0
+    image: cowrie/cowrie:latest
     container_name: cowrie
-    restart: unless-stopped
-    environment:
-      - COWRIE_USER=cowrie
-    volumes:
-      # ❗️Cowrie liest seine Config hier:
-      - ./cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
-      # ❗️Mount das Standard-Logverzeichnis von Cowrie:
-      - cowrie_log:/cowrie/cowrie-git/var/log/cowrie
     ports:
-      - "${COWRIE_SSH_PORT:-2222}:2222"
-    healthcheck:
-      test: ["CMD-SHELL", "python -c 'import socket,sys;s=socket.socket(); s.settimeout(1); sys.exit(0 if (s.connect_ex((\"127.0.0.1\",2222))==0) else 1)'"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      - "2022:2222"  # SSH nach außen
+    volumes:
+      - ./cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
+      - ./cowrie/log:/cowrie/cowrie-git/var/log/cowrie
+    networks: [honeynet]
+    restart: unless-stopped
 
   pcap-capture:
     image: nicolaka/netshoot:latest
     container_name: pcap-capture
-    # teilt die Netz-Namespace mit cowrie:
-    network_mode: "container:cowrie"
+    # Sniff im Bridge-Netz (gleiche Bridge wie cowrie & extractor)
+    # -> tcpdump sieht Verbindungen auf Container-Port 2222
     command: >
-      sh -c '
-        set -e;
-        mkdir -p /data/pcap;
-        echo "starting tcpdump on port 2222";
-        # rotiert jede 60s, Dateiname mit Zeitstempel (strftime)
-        while true; do
-          tcpdump -i any -nn -s 0 \
-            -w /data/pcap/ssh-%Y%m%d-%H%M%S.pcap \
-            "tcp port 2222" \
-            -G 60 -W 1 || true;
-          sleep 1;
-        done
+      sh -lc '
+        mkdir -p /data/pcap &&
+        tcpdump -i eth0 -U -w /data/pcap/ssh-$(date +%Y%m%d-%H%M%S).pcap
+          tcp port 2222 -G 30 -W 100 -nn -q
       '
-    volumes:
-      - pcap_data:/data/pcap
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    volumes:
+      - ./data/pcap:/data/pcap
+    networks: [honeynet]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "sh", "-c", "test -d /data/pcap || exit 1"]
-      interval: 60s
-      timeout: 5s
-      retries: 3
-
 
   extractor:
     build:
       context: ./extractor
-      dockerfile: Dockerfile
-    container_name: honeypot-extractor
-    restart: unless-stopped
-    volumes:
-      - pcap_data:/data/pcap
-      - out_data:/data/out
-      # ❗️Cowrie-Log read-only mounten (richtiger Pfad):
-      - cowrie_log:/cowrie/cowrie-git/var/log/cowrie:ro
+    container_name: extractor
     environment:
-      - OUT_DIR=/data/out
-      - PCAP_DIR=/data/pcap
-      - COWRIE_JSON=/cowrie/cowrie-git/var/log/cowrie/cowrie.json
-      - SENSOR_ID=${SENSOR_ID}
-    command: ["python", "/opt/extractor.py",
-              "--pcap-dir","/data/pcap",
-              "--cowrie-json","/cowrie/cowrie-git/var/log/cowrie/cowrie.json",
-              "--out-dir","/data/out",
-              "--sensor-id","${SENSOR_ID}",
-              "--ssh-port","2222",
-              "--scan-interval","10"]
-    healthcheck:
-      # einfache Datei-Existenzprüfung wäre sinnvoller, aber wir lassen dein HC so stehen
-      test: ["CMD", "python", "/opt/healthcheck.py", "127.0.0.1", "1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      # SEND_URL absichtlich NICHT gesetzt -> kein Senden im Dauerlauf
+      API_KEY: ${API_KEY}
+      COWRIE_JSON: /cowrie/log/cowrie.json
+      PCAP_DIR: /data/pcap
+      OUT_DIR: /data/out
+      SENSOR_ID: honeypot-01
+    volumes:
+      - ./extractor/extractor.py:/opt/extractor/extractor.py:ro
+      - ./extractor/trigger.py:/app/trigger.py:ro
+      - ./data/pcap:/data/pcap:ro
+      - ./data/out:/data/out
+      - ./cowrie/log:/cowrie/log:ro
+    depends_on:
+      - cowrie
+      - pcap-capture
+    networks: [honeynet]
+    restart: unless-stopped
+    # Default-CMD kommt aus extractor/entrypoint.sh (Loop, nur schreiben)
+
+  session-trigger:
+    build:
+      context: ./extractor
+    container_name: session-trigger
+    environment:
+      API_KEY: ${API_KEY}
+      COWRIE_JSON: /cowrie/log/cowrie.json
+      PCAP_DIR: /data/pcap
+      OUT_DIR: /data/out
+      SENSOR_ID: honeypot-01
+      COLLECTOR_URL: http://host.docker.internal:8000/add_attack   # uploader
+      SEND_URL: http://host.docker.internal:8000/add_attack 
+      EXTRACTOR_BIN: "python /opt/extractor/extractor.py"
+      USE_TSHARK: "0"                               # auf "1", wenn Image mit tshark gebaut
+    command: ["python", "/app/trigger.py"]
+    volumes:
+      - ./extractor/extractor.py:/opt/extractor/extractor.py:ro
+      - ./extractor/entrypoint.sh:/app/entrypoint.sh:ro
+      - ./data/pcap:/data/pcap:ro
+      - ./data/out:/data/out
+      - ./cowrie/log:/cowrie/log:ro
+    depends_on:
+      - cowrie
+      - pcap-capture
+    networks: [honeynet]
+    restart: unless-stopped
 
   uploader:
     build:
       context: ./uploader
-      dockerfile: Dockerfile
-    container_name: honeypot-uploader
-    restart: unless-stopped
-    volumes:
-      # ❗️Cowrie-Log read-only mounten (richtiger Pfad):
-      - cowrie_log:/cowrie/cowrie-git/var/log/cowrie:ro
+    container_name: uploader
     environment:
-      - PYTHONUNBUFFERED=1
-      - COWRIE_JSON=/cowrie/cowrie-git/var/log/cowrie/cowrie.json
-      - API_KEY=${API_KEY}
-      - COLLECTOR_URL=${COLLECTOR_URL}
-      - SENSOR_ID=${SENSOR_ID}
-      - BATCH_MAX_COUNT=${BATCH_MAX_COUNT}
-      - BATCH_MAX_BYTES=${BATCH_MAX_BYTES}
-      - BATCH_MAX_SECONDS=${BATCH_MAX_SECONDS}
-      - RATE_LIMIT_POSTS_PER_MIN=${RATE_LIMIT_POSTS_PER_MIN}
+      API_KEY: ${API_KEY}
+      COLLECTOR_URL: http://host.docker.internal:8000/add_attack   # uploader
+      SEND_URL: http://host.docker.internal:8000/add_attack 
+      COWRIE_JSON: /cowrie/log/cowrie.json
+    volumes:
+      - ./cowrie/log:/cowrie/log:ro
     depends_on:
-      - extractor
-    healthcheck:
-      test: ["CMD", "python", "/opt/healthcheck.py", "127.0.0.1", "1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-volumes:
-  cowrie_log:
-  pcap_data:
-  out_data:
+      - cowrie
+    networks: [honeynet]
+    restart: unless-stopped
 
 networks:
-  hostnet:
+  honeynet:
     driver: bridge
