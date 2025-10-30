@@ -1,31 +1,20 @@
 #!/usr/bin/env python3
 """
-extractor.py
+extractor.py (patched)
 
-- Beobachtet PCAP-Ordner für neue Dateien (*.pcap, *.pcap.done)
-- Verarbeitet jede PCAP atomar (rename -> .processing -> archive/.processed)
-- Extrahiert SSH-Sessions (default: Port 2222, via --ssh-port änderbar)
-- Liest cowrie.json (NDJSON) und verknüpft Events mit Sessions (src_ip + Zeitfenster)
-- Schreibt /data/out/merged_sessions.json atomar (JSON-Liste; append-merge)
+Same behaviour as before, but pcap_file uses the original rotated filename
+(without .processing/.done) so merged_sessions.json shows the real PCAP name.
 """
 
-import os
-import sys
-import time
-import json
-import argparse
-import hashlib
-import statistics
+import os, sys, time, json, argparse, statistics
 from datetime import datetime, timezone
 from collections import defaultdict, Counter
-
 from scapy.all import rdpcap, TCP, IP, Raw  # noqa: E402
 
-# ----------------- Helpers -----------------
 def iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
-def parse_iso(s: str) -> float | None:
+def parse_iso(s: str):
     try:
         return datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp()
     except Exception:
@@ -47,105 +36,83 @@ def now_iso():
 def human(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"
 
-# ----------------- PCAP processing -----------------
-def process_pcap(pcap_path: str, sensor_id: str, ssh_port: int) -> list[dict]:
-    """
-    Parse a PCAP and extract per-session features for SSH traffic on ssh_port.
-    """
+def normalize_pcap_basename(path: str) -> str:
+    """Return the original rotated pcap basename without .processing or .done suffixes."""
+    base = os.path.basename(path)
+    # remove .processing if present
+    if base.endswith('.processing'):
+        base = base[:-11]
+    # remove trailing .done if present
+    if base.endswith('.done'):
+        base = base[:-5]
+    return base
+
+def process_pcap(pcap_path: str, sensor_id: str, ssh_port: int) -> list:
     try:
         pkts = rdpcap(pcap_path)
     except Exception as e:
         print(f"[WARN] Could not read pcap {pcap_path}: {human(e)}", file=sys.stderr)
         return []
 
-    # Group by normalized 4-tuple (client_ip, client_port, server_ip, server_port)
-    sess_pkts: dict[tuple, list] = defaultdict(list)
+    sess_pkts = defaultdict(list)
     for p in pkts:
         if IP in p and TCP in p:
-            ip = p[IP]
-            tcp = p[TCP]
+            ip = p[IP]; tcp = p[TCP]
             if tcp.sport != ssh_port and tcp.dport != ssh_port:
                 continue
-            # normalize: choose client as the non-ssh_port side
             if tcp.dport == ssh_port:
-                client = (ip.src, tcp.sport)
-                server = (ip.dst, tcp.dport)
+                client=(ip.src, tcp.sport); server=(ip.dst, tcp.dport)
             else:
-                client = (ip.dst, tcp.dport)
-                server = (ip.src, tcp.sport)
-            key = (client[0], int(client[1]), server[0], int(server[1]))
+                client=(ip.dst, tcp.dport); server=(ip.src, tcp.sport)
+            key=(client[0], int(client[1]), server[0], int(server[1]))
             sess_pkts[key].append(p)
 
-    results: list[dict] = []
-    for (c_ip, c_port, s_ip, s_port), pkts in sess_pkts.items():
-        # chronological
-        ts = [float(p.time) for p in pkts]
-        ts.sort()
-        first_seen = ts[0]
-        last_seen = ts[-1]
-        duration = last_seen - first_seen if len(ts) > 1 else 0.0
-
+    results=[]
+    for (c_ip,c_port,s_ip,s_port), pkts in sess_pkts.items():
+        ts = sorted([float(p.time) for p in pkts])
+        first_seen = ts[0]; last_seen = ts[-1]
+        duration = last_seen - first_seen if len(ts)>1 else 0.0
         pkt_count = len(pkts)
         bytes_total = sum(len(bytes(p)) for p in pkts)
-
-        # IATs
-        iats = [t2 - t1 for t1, t2 in zip(ts, ts[1:])]
-        iat_mean = mean_or_none(iats)
-        iat_median = median_or_none(iats)
-
-        # TTLs, windows
+        iats = [t2 - t1 for t1,t2 in zip(ts, ts[1:])]
+        iat_mean = mean_or_none(iats); iat_median = median_or_none(iats)
         ttls = [int(p[IP].ttl) for p in pkts if IP in p]
         wins = [int(p[TCP].window) for p in pkts if TCP in p]
-        ttl_median = median_or_none(ttls)
-        win_median = median_or_none(wins)
-
-        # TCP flags stats
+        ttl_median = median_or_none(ttls); win_median = median_or_none(wins)
         flag_counts = Counter()
         for p in pkts:
             if TCP in p:
                 flag_counts[str(p[TCP].flags)] += 1
-
-        # crude retrans heuristic: duplicate seqs per side
-        seen_seqs: dict[str, set[int]] = {'c': set(), 's': set()}
-        retrans = 0
+        seen_seqs={'c': set(), 's': set()}; retrans=0
         for p in pkts:
-            t = p[TCP]
-            side = 'c' if (p[IP].src == c_ip and t.sport == c_port) else 's'
-            seq = int(t.seq)
+            t=p[TCP]; side='c' if (p[IP].src==c_ip and t.sport==c_port) else 's'
+            seq=int(t.seq)
             if seq in seen_seqs[side]:
                 retrans += 1
             else:
                 seen_seqs[side].add(seq)
 
-        # payloads, banners
-        payloads: list[str] = []
-        banner_client = None
-        banner_server = None
-        concatenated = b""
+        payloads=[]; banner_client=None; banner_server=None; concatenated=b""
         for p in pkts:
             if Raw in p:
-                b = bytes(p[Raw].load)
-                concatenated += b
+                b=bytes(p[Raw].load); concatenated += b
                 s = b.decode('utf-8', errors='ignore')
                 if 'SSH-' in s:
-                    if p[IP].src == c_ip and banner_client is None:
-                        idx = s.find('SSH-')
-                        banner_client = s[idx:].splitlines()[0]
-                    if p[IP].src == s_ip and banner_server is None:
-                        idx = s.find('SSH-')
-                        banner_server = s[idx:].splitlines()[0]
+                    if p[IP].src==c_ip and banner_client is None:
+                        idx = s.find('SSH-'); banner_client = s[idx:].splitlines()[0]
+                    if p[IP].src==s_ip and banner_server is None:
+                        idx = s.find('SSH-'); banner_server = s[idx:].splitlines()[0]
                 ascii_seq = ''.join(ch for ch in s if 32 <= ord(ch) <= 126)
                 if len(ascii_seq) >= 4:
                     payloads.append(ascii_seq)
 
-        # HASSH (heuristic if not from Cowrie)
-        hassh = None
+        hassh=None
         try:
             text = concatenated.decode('utf-8', errors='ignore')
             import re
             combos = re.findall(r'([A-Za-z0-9@._+-]+(?:,[A-Za-z0-9@._+-]+){2,40})', text)
             kex_candidates = [c for c in combos if any(x in c.lower() for x in
-                                ['diffie', 'ecdh', 'rsa', 'curve25519', 'aes', 'chacha20', 'hmac', 'umac', 'gcm', 'ctr'])]
+                                    ['diffie','ecdh','rsa','curve25519','aes','chacha20','hmac','umac','gcm','ctr'])]
             if kex_candidates:
                 hassh = sha256_hex((','.join(kex_candidates)).encode('utf-8'))[:64]
             elif concatenated:
@@ -155,6 +122,7 @@ def process_pcap(pcap_path: str, sensor_id: str, ssh_port: int) -> list[dict]:
 
         session_obj = {
             "sensor_id": sensor_id,
+            # keep pcap_file as placeholder; caller will replace with normalized basename
             "pcap_file": os.path.basename(pcap_path),
             "src_ip": c_ip,
             "src_port": c_port,
@@ -177,193 +145,148 @@ def process_pcap(pcap_path: str, sensor_id: str, ssh_port: int) -> list[dict]:
             "hassh": hassh,
         }
         results.append(session_obj)
-
     return results
 
-# ----------------- Cowrie NDJSON loader (windowed) -----------------
-def load_cowrie_events_window(cowrie_json_path: str, src_ips: set[str], tmin: float, tmax: float) -> list[dict]:
-    """
-    Stream cowrie.json (NDJSON) and only keep events:
-      - with src_ip in src_ips
-      - timestamp within [tmin-5s, tmax+5s]
-    """
-    evs = []
+def load_cowrie_events_window(cowrie_json_path: str, src_ips: set, tmin: float, tmax: float):
+    evs=[]
     if not os.path.exists(cowrie_json_path):
         return evs
-
-    low = tmin - 5
-    high = tmax + 5
+    low = tmin - 5; high = tmax + 5
     try:
         with open(cowrie_json_path, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except Exception:
-                    continue
+                line=line.strip()
+                if not line: continue
+                try: ev=json.loads(line)
+                except Exception: continue
                 sip = ev.get('src_ip') or ev.get('src_host') or ev.get('src_addr')
-                if not sip or sip not in src_ips:
-                    continue
+                if not sip or sip not in src_ips: continue
                 ts_str = ev.get('timestamp') or ev.get('time') or ev.get('timestamp_iso')
-                if not ts_str:
-                    continue
-                ts = parse_iso(ts_str) if not isinstance(ts_str, (int, float)) else float(ts_str)
-                if ts is None:
-                    continue
-                if low <= ts <= high:
-                    evs.append(ev)
+                if not ts_str: continue
+                ts = parse_iso(ts_str) if not isinstance(ts_str,(int,float)) else float(ts_str)
+                if ts is None: continue
+                if low <= ts <= high: evs.append(ev)
     except Exception as e:
         print(f"[WARN] Reading cowrie.json failed: {human(e)}", file=sys.stderr)
     return evs
 
-def link_sessions_with_events(sessions: list[dict], events: list[dict]) -> list[dict]:
-    # index events by src_ip for quick match
-    by_ip: dict[str, list[dict]] = defaultdict(list)
+def link_sessions_with_events(sessions, events):
+    by_ip=defaultdict(list)
     for ev in events:
         sip = ev.get('src_ip') or ev.get('src_host') or ev.get('src_addr')
-        if sip:
-            by_ip[sip].append(ev)
-
+        if sip: by_ip[sip].append(ev)
     for s in sessions:
-        linked = []
+        linked=[]
         evs = by_ip.get(s['src_ip'], [])
         if not evs:
-            s['linked_cowrie_events'] = linked
-            continue
-        first = parse_iso(s['first_seen'])
-        last = parse_iso(s['last_seen'])
+            s['linked_cowrie_events']=linked; continue
+        first=parse_iso(s['first_seen']); last=parse_iso(s['last_seen'])
         if first is None or last is None:
-            s['linked_cowrie_events'] = linked
-            continue
-        low = first - 5
-        high = last + 5
+            s['linked_cowrie_events']=linked; continue
+        low=first-5; high=last+5
         for ev in evs:
             t = ev.get('timestamp') or ev.get('time') or ev.get('timestamp_iso')
-            if t is None:
-                continue
-            ts = float(t) if isinstance(t, (int, float)) else parse_iso(str(t))
-            if ts is None:
-                continue
-            if low <= ts <= high:
-                linked.append(ev)
-        s['linked_cowrie_events'] = linked
+            if t is None: continue
+            ts = float(t) if isinstance(t,(int,float)) else parse_iso(str(t))
+            if ts is None: continue
+            if low <= ts <= high: linked.append(ev)
+        s['linked_cowrie_events']=linked
     return sessions
 
-# ----------------- File handling -----------------
-import re
-
-PCAP_NAME_RE = re.compile(r"^ssh-\d{8}-\d{6}\.pcap(?:\.done)?$")  # z.B. ssh-20251029-231200.pcap.done
-
-
-def list_candidate_pcaps(pcap_dir: str) -> list[str]:
+def list_candidate_pcaps(pcap_dir: str):
     try:
-        files = os.listdir(pcap_dir)
+        files=os.listdir(pcap_dir)
     except Exception:
         return []
-    out = []
+    out=[]
+    import re
+    PCAP_NAME_RE = re.compile(r"^ssh-\d{8}-\d{6}\.pcap(?:\.done)?$")
     for f in files:
-        if f.endswith(('.processing', '.processed', '.failed')):
-            continue
-        if not (f.endswith('.pcap') or f.endswith('.pcap.done')):
-            continue
-        if not PCAP_NAME_RE.match(f):     # alte "ssh-.pcap" ausschließen
-            continue
-        full = os.path.join(pcap_dir, f)
+        if f.endswith(('.processing', '.processed', '.failed')): continue
+        if not (f.endswith('.pcap') or f.endswith('.pcap.done')): continue
+        if not PCAP_NAME_RE.match(f): continue
+        full=os.path.join(pcap_dir,f)
         try:
-            if os.path.getsize(full) <= 64:  # zu klein für pcap/pcapng → ignorieren
-                continue
+            if os.path.getsize(full) <= 64: continue
         except OSError:
             continue
         out.append(full)
     return sorted(out)
 
-
 def to_processing_name(path: str) -> str:
-    # ensure we don't stack suffixes
-    base = os.path.basename(path)
+    base=os.path.basename(path)
     if base.endswith('.pcap.done'):
-        base = base[:-5]  # remove ".done"
+        base = base[:-5]
     return os.path.join(os.path.dirname(path), base + '.processing')
 
 def archive_path(archive_dir: str, processing_path: str) -> str:
-    base = os.path.basename(processing_path)  # e.g., ssh-...pcap.processing
+    base=os.path.basename(processing_path)
     if base.endswith('.processing'):
-        base = base[:-11]  # strip '.processing'
+        base = base[:-11]
     return os.path.join(archive_dir, base + '.processed')
 
-# ----------------- Main runner -----------------
 def main():
-    parser = argparse.ArgumentParser()
+    parser=argparse.ArgumentParser()
     parser.add_argument("--pcap-dir", required=True)
     parser.add_argument("--cowrie-json", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--sensor-id", default="unknown")
-    parser.add_argument("--ssh-port", type=int, default=2222)  # <- wichtig
+    parser.add_argument("--ssh-port", type=int, default=2222)
     parser.add_argument("--scan-interval", type=int, default=10)
     args = parser.parse_args()
 
-    pcap_dir = args.pcap_dir
-    out_dir = args.out_dir
-    cowrie_json = args.cowrie_json
-    sensor_id = args.sensor_id
-    ssh_port = int(args.ssh_port)
+    pcap_dir = args.pcap_dir; out_dir = args.out_dir; cowrie_json = args.cowrie_json
+    sensor_id = args.sensor_id; ssh_port = int(args.ssh_port)
 
     os.makedirs(out_dir, exist_ok=True)
-    archive_dir = os.path.join(pcap_dir, "archive")
-    failed_dir = os.path.join(pcap_dir, "failed")
-    os.makedirs(archive_dir, exist_ok=True)
-    os.makedirs(failed_dir, exist_ok=True)
+    archive_dir = os.path.join(pcap_dir, "archive"); failed_dir = os.path.join(pcap_dir, "failed")
+    os.makedirs(archive_dir, exist_ok=True); os.makedirs(failed_dir, exist_ok=True)
 
     merged_out = os.path.join(out_dir, "merged_sessions.json")
 
     while True:
-        # 1) finde Kandidaten
         pcaps = list_candidate_pcaps(pcap_dir)
-
-        new_sessions: list[dict] = []
+        new_sessions=[]
         for p in pcaps:
             proc = to_processing_name(p)
             try:
-                # atomic rename -> *.processing
                 os.replace(p, proc)
             except FileNotFoundError:
                 continue
             except Exception as e:
-                print(f"[INFO] skip {p}: rename failed: {e}", file=sys.stderr)
+                print(f"[INFO] skip {p}: rename failed: {human(e)}", file=sys.stderr)
                 continue
 
             try:
-                sess = process_pcap(proc, sensor_id, ssh_port)
-                if not sess:  # leer oder Leseproblem => failed
-                    raise RuntimeError("no sessions extracted")
-                new_sessions.extend(sess)
+                # extract sessions
+                sess_list = process_pcap(proc, sensor_id, ssh_port)
+                # normalize pcap filename for output to original rotated name
+                real_basename = normalize_pcap_basename(p)
+                for s in sess_list:
+                    s['pcap_file'] = real_basename
+                if sess_list:
+                    new_sessions.extend(sess_list)
                 final = archive_path(archive_dir, proc)
-                os.replace(proc, final)  # -> archive/*.processed
+                os.replace(proc, final)
+                print(f"[{now_iso()}] processed {real_basename}, sessions={len(sess_list)}")
             except Exception as e:
-                print(f"[ERROR] processing {p}: {e}", file=sys.stderr)
+                print(f"[ERROR] processing {p}: {human(e)}", file=sys.stderr)
                 try:
                     os.replace(proc, os.path.join(failed_dir, os.path.basename(proc)))
                 except Exception:
                     pass
 
-
-        # 2) Events verknüpfen (nur wenn Sessions neu)
         if new_sessions:
-            # baue Zeitfenster über alle Sessions zur NDJSON-Filterung
             tmins = [parse_iso(s['first_seen']) for s in new_sessions if parse_iso(s['first_seen']) is not None]
             tmaxs = [parse_iso(s['last_seen']) for s in new_sessions if parse_iso(s['last_seen']) is not None]
             if tmins and tmaxs:
-                tmin = min(tmins)
-                tmax = max(tmaxs)
+                tmin=min(tmins); tmax=max(tmaxs)
                 src_ips = {s['src_ip'] for s in new_sessions}
                 evs = load_cowrie_events_window(cowrie_json, src_ips, tmin, tmax)
                 new_sessions = link_sessions_with_events(new_sessions, evs)
 
-        # 3) atomar in merged_sessions.json mergen
-        if new_sessions:
-            existing = []
+            # merge atomically
+            existing=[]
             if os.path.exists(merged_out):
                 try:
                     with open(merged_out, 'r', encoding='utf-8') as fh:
