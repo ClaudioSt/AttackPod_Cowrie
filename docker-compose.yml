@@ -3,7 +3,7 @@ services:
     image: cowrie/cowrie:latest
     container_name: cowrie
     ports:
-      - "2022:2222"  # SSH nach außen
+      - "${COWRIE_SSH_PORT}:2222"  # SSH nach außen
     volumes:
       - ./cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
       - ./cowrie/log:/cowrie/cowrie-git/var/log/cowrie
@@ -86,13 +86,17 @@ services:
     container_name: honeynet-web
     restart: unless-stopped
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "80:80"
+      - "443:443"
     volumes:
       - ./web/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data/out:/srv/data:ro
       - ./web/index.html:/srv/index.html:ro
+      - caddy_data:/data
+      - caddy_config:/config
     environment:
       ENABLE_WEB: ${ENABLE_WEB}
+      WEB_DOMAIN: ${WEB_DOMAIN}
     entrypoint:  >
       sh -lc '
         if [ "${ENABLE_WEB}" = "1" ]; then
@@ -105,3 +109,7 @@ services:
 networks:
   honeynet:
     driver: bridge
+    
+volumes:
+  caddy_data:
+  caddy_config:

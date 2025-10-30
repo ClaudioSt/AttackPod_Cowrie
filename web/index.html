@@ -1,57 +1,345 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8" />
-  <title>Honeynet Session Viewer</title>
-  <style>
-    body { font-family: system-ui, sans-serif; background: #fafafa; margin: 0; }
-    header { background: #333; color: #fff; padding: 10px 20px; }
-    main { padding: 20px; }
-    h1 { margin: 0; }
-    pre { background: #eee; padding: 10px; border-radius: 8px; overflow-x: auto; }
-    .file { margin-bottom: 1em; }
-    button { margin-right: 5px; }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Login Attempts</title>
+<style>
+  :root{
+    --bg:#0f1724; --card:#0b1220; --muted:#9aa6bd; --accent:#60a5fa;
+    --glass: rgba(255,255,255,0.05);
+  }
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;background:linear-gradient(180deg,#071021 0%,#061827 100%);color:#e6eef8}
+  .wrap{max-width:1200px;margin:28px auto;padding:20px;display:grid;grid-template-columns: 1.3fr 0.7fr;gap:16px}
+  header{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  h1{margin:0;font-size:1.25rem}
+  .table-wrap{grid-column:1; background:var(--glass);padding:12px;border-radius:12px}
+  table{width:100%;border-collapse:collapse;color:#e6eef8}
+  th,td{padding:10px 8px;text-align:left;font-size:0.95rem;border-bottom:1px solid rgba(255,255,255,0.06)}
+  th{color:var(--muted);font-weight:600;font-size:0.85rem}
+  tr{transition:background 120ms ease}
+  tbody tr:hover{background:rgba(255,255,255,0.03);cursor:pointer}
+  .small{font-size:0.83rem;color:var(--muted)}
+
+  /* Detail & Timeline */
+  .detail{grid-column:2;position:sticky;top:16px;align-self:start}
+  .card{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 6px 24px rgba(2,6,23,0.5)}
+  .fade-in{animation:fadein 220ms ease}
+  @keyframes fadein{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+
+  .timeline{position:relative;margin-top:10px;padding-left:26px}
+  .timeline::before{content:"";position:absolute;left:10px;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.08)}
+  .t-item{position:relative;margin:14px 0;padding-left:8px}
+  .t-item::before{
+    content:"";position:absolute;left:-16px;top:6px;width:12px;height:12px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 0 3px rgba(96,165,250,0.25)
+  }
+  .t-title{font-weight:600}
+  .t-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}       /* mehr Abstand vor den Δ-Zeilen */
+  .t-meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}      /* mehr Abstand vor User/Passwort */
+  .pill{display:inline-block;padding:3px 8px;border-radius:999px;background:rgba(255,255,255,0.06);font-size:0.82rem}
+  .muted{color:var(--muted)}
+  .btn{background:var(--card);border:1px solid rgba(255,255,255,0.12);padding:8px 10px;border-radius:10px;color:#e6eef8;cursor:pointer;text-decoration:none;display:inline-block}
+  .btn:hover{border-color:rgba(255,255,255,0.25)}
+  @media (max-width:1100px){
+    .wrap{grid-template-columns:1fr}
+    .detail{position:relative;top:auto}
+  }
+</style>
 </head>
 <body>
-  <header>
-    <h1>🐝 Honeynet Session Viewer</h1>
-  </header>
-  <main>
-    <p>Verfügbare Sessions:</p>
-    <ul id="file-list"></ul>
-    <hr>
-    <div id="content"></div>
-  </main>
+  <div class="wrap">
+    <header>
+      <h1>NetWatch — letzte Login Versuche 👀</h1>
+      <span class="small" id="status"></span>
+    </header>
 
-  <script>
-    async function listFiles() {
-      const resp = await fetch('/api/data/');
-      const text = await resp.text();
-      const files = [...text.matchAll(/href="([^"]+\.json)"/g)].map(m => m[1]);
-      const ul = document.getElementById('file-list');
-      ul.innerHTML = '';
-      files.forEach(f => {
-        const li = document.createElement('li');
-        const btn = document.createElement('button');
-        btn.textContent = f;
-        btn.onclick = () => loadFile(f);
-        li.appendChild(btn);
-        ul.appendChild(li);
+    <!-- Liste -->
+    <div class="table-wrap">
+      <table id="sessionsTable" aria-describedby="tableDesc">
+        <caption id="tableDesc" class="small">Session-ID, Angreifer-IP, Login-Versuche, Session-Start (Berlin), hassh / client_banner</caption>
+        <thead>
+          <tr>
+            <th>Session (ID)</th>
+            <th>Angreifer IP</th>
+            <th>Login-Versuche</th>
+            <th>Session-Start (Berlin)</th>
+            <th class="small">hassh / client_banner</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <tr><td colspan="5" class="small">lade…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Detail-Panel -->
+    <aside class="detail">
+      <div class="card" id="detailCard">
+        <div class="muted">Details</div>
+        <div id="detailContent" class="small">Klicke eine Session, um die Timeline (Start → Versuche → Ende) zu sehen.</div>
+      </div>
+    </aside>
+  </div>
+
+<script>
+(async function(){
+  const BASE_PATH = '/data/';
+  const POLL_INTERVAL = 5000; // ms
+  const MAX_SHOW = 10;
+
+  const tableBody = document.getElementById('tableBody');
+  const statusEl = document.getElementById('status');
+  const detailContent = document.getElementById('detailContent');
+
+  // State
+  let knownFiles = new Set();
+  let sessions = []; // sorted desc by first_seen
+
+  // Map Session-ID -> Dateiname/URL für "JSON öffnen"
+  const fileBySessionId = new Map();
+
+  // Helpers
+  function escapeHtml(t){
+    if(!t && t!==0) return '';
+    return String(t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+  }
+
+  // Berlin-Zeit, OHNE Zeitzonen-Kürzel und OHNE Millisekunden
+  function formatBerlin(inputDate){
+    if(!inputDate) return '—';
+    const d = (inputDate instanceof Date) ? inputDate : new Date(inputDate);
+    const opts = { timeZone: 'Europe/Berlin', hour12: false, year:'numeric', month:'2-digit', day:'2-digit',
+                   hour:'2-digit', minute:'2-digit', second:'2-digit' };
+    return new Intl.DateTimeFormat('de-DE', opts).format(d);
+  }
+
+  // Δ immer mit 3 Nachkommastellen in Sekunden
+  function deltaSec(ms){ return (ms/1000).toFixed(3) + 's'; }
+  function msBetween(a,b){ return (new Date(b).getTime() - new Date(a).getTime()); }
+
+  function choose(value, ...keys){
+    if(!value) return null;
+    for(const k of keys){ if(k in value && value[k]) return value[k]; }
+    return null;
+  }
+
+  function parseAttempts(attempts){
+    // Normalize to [{user, pass, ts:Date|null}]
+    const out = [];
+    for(const a of (Array.isArray(attempts)? attempts : [])){
+      if(a && typeof a === 'object' && !Array.isArray(a)){
+        const user = choose(a,'user','username','login','name');
+        const pass = choose(a,'password','passwd','pass','pw');
+        const ts   = choose(a,'ts','timestamp','time','at','t','date');
+        out.push({ user, pass, ts: ts ? new Date(ts) : null, _raw:a });
+      }else if (Array.isArray(a)){
+        out.push({ user: a[0] ?? null, pass: a[1] ?? null, ts: a[2] ? new Date(a[2]) : null, _raw:a });
+      }else if (typeof a === 'string'){
+        const m = String(a).split(':'); // "user:pass"
+        out.push({ user: m[0]||null, pass: m[1]||null, ts: null, _raw:a });
+      }
+    }
+    // sort chronologisch
+    out.sort((x,y)=>{
+      if(!x.ts && !y.ts) return 0;
+      if(!x.ts) return 1;
+      if(!y.ts) return -1;
+      return x.ts - y.ts;
+    });
+    return out;
+  }
+
+  async function listJsonFiles(){
+    try{
+      const res = await fetch(BASE_PATH, { method: 'GET', cache: 'no-store' });
+      const txt = await res.text();
+      const doc = new DOMParser().parseFromString(txt, 'text/html');
+      const anchors = Array.from(doc.querySelectorAll('a'));
+      const jsons = anchors.map(a => a.getAttribute('href') || '')
+                           .filter(h => /\.json$/i.test(h))
+                           .map(h => new URL(h, new URL(BASE_PATH, window.location.origin)).pathname);
+      return [...new Set(jsons)];
+    }catch(e){
+      console.warn('Konnte /data/ nicht lesen:', e);
+      return [];
+    }
+  }
+
+  async function fetchJson(path){
+    try{
+      const r = await fetch(path, {cache:'no-store'});
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    }catch(e){
+      console.warn('Fehler beim Laden', path, e);
+      return null;
+    }
+  }
+
+  function normalizeSession(s, filePath) {
+    const first = s.first_seen || s.first || s._collected_at || null;
+    const durationSec = typeof s.duration === 'number' ? s.duration : null;
+    const endSeen = s.end_seen || s.last_seen || (first && durationSec ? new Date(new Date(first).getTime() + durationSec*1000).toISOString() : null);
+
+    const normalized = {
+      session_id: s.session_id,
+      src_ip: s.src_ip || s.client_ip || s.src || '—',
+      first_seen: first,
+      end_seen: endSeen,
+      duration: durationSec,
+      login_attempts: Array.isArray(s.login_attempts) ? s.login_attempts : [],
+      hassh: s.hassh || null,
+      client_banner: s.client_banner || s.client_version || null,
+      file_path: filePath,
+      _raw: s
+    };
+    if (normalized.session_id && filePath) fileBySessionId.set(normalized.session_id, filePath);
+    return normalized;
+  }
+
+  function rowHtml(s){
+    const idShort = s.session_id.slice(0,12);
+    const attempts = s.login_attempts.length;
+    const banner = s.client_banner ? `<div class="small">${escapeHtml(s.client_banner)}</div>` : '';
+    const hasshHtml = s.hassh ? `<div class="small pill" style="display:inline-block;padding:3px 8px;border-radius:999px;background:rgba(255,255,255,0.06)">${escapeHtml(s.hassh)}</div>` : '<span class="small muted">—</span>';
+    return `
+      <td><strong title="${escapeHtml(s.session_id)}">${escapeHtml(idShort)}</strong></td>
+      <td>${escapeHtml(s.src_ip)}</td>
+      <td>${attempts}</td>
+      <td>${formatBerlin(s.first_seen)}</td>
+      <td>${hasshHtml}${banner}</td>
+    `;
+  }
+
+  function renderIncremental(newOnes){
+    const frag = document.createDocumentFragment();
+    for(const s of newOnes){
+      const tr = document.createElement('tr');
+      tr.className = 'fade-in';
+      tr.dataset.sessionId = s.session_id;
+      tr.innerHTML = rowHtml(s);
+      tr.addEventListener('click', () => showDetails(s));
+      frag.appendChild(tr);
+    }
+    // clear "lade…" state if present
+    const firstCell = tableBody.querySelector('td');
+    if(firstCell && firstCell.colSpan === 5){ tableBody.innerHTML = ''; }
+    tableBody.prepend(frag);
+
+    // cap rows
+    while(tableBody.rows.length > MAX_SHOW) tableBody.deleteRow(-1);
+  }
+
+  function showDetails(s){
+    // Build events: Start, attempts…, End
+    const startTs = s.first_seen ? new Date(s.first_seen) : null;
+    const endTs = s.end_seen ? new Date(s.end_seen) : null;
+    const attempts = parseAttempts(s.login_attempts);
+
+    const events = [];
+    if(startTs){ events.push({ type:'start', label:'Session-Start', ts: startTs }); }
+    for(let i=0;i<attempts.length;i++){
+      events.push({
+        type:'attempt',
+        label:`Anmeldeversuch ${i+1}`,
+        ts: attempts[i].ts || null,
+        user: attempts[i].user,
+        pass: attempts[i].pass
       });
     }
+    if(endTs){ events.push({ type:'end', label:'Session-Ende', ts: endTs }); }
 
-    async function loadFile(name) {
-      const resp = await fetch(`/api/data/${name}`);
-      const json = await resp.json();
-      const pre = document.createElement('pre');
-      pre.textContent = JSON.stringify(json, null, 2);
-      const content = document.getElementById('content');
-      content.innerHTML = '';
-      content.appendChild(pre);
+    // Timeline HTML (Session-Start ohne Δs)
+    let prevTs = startTs;
+    const itemsHtml = events.map((ev, idx) => {
+      const tsStr = ev.ts ? formatBerlin(ev.ts) : '—';
+      const isStart = ev.type === 'start';
+      const deltaFromStart = (!isStart && ev.ts && startTs) ? deltaSec(msBetween(startTs, ev.ts)) : null;
+      const deltaFromPrev  = (!isStart && ev.ts && prevTs)  ? deltaSec(msBetween(prevTs,  ev.ts))  : null;
+      if(ev.ts) prevTs = ev.ts;
+
+      const deltas = (!isStart)
+        ? `<div class="t-row">
+             <span class="pill">Δ seit Start: <strong>${deltaFromStart ?? '—'}</strong></span>
+             <span class="pill">Δ seit vorher: <strong>${deltaFromPrev ?? '—'}</strong></span>
+           </div>`
+        : '';
+
+      const extras = (ev.type === 'attempt')
+        ? `<div class="t-meta small muted">
+             <span class="pill">User: ${escapeHtml(ev.user ?? '—')}</span>
+             <span class="pill">Passwort: ${escapeHtml(ev.pass ?? '—')}</span>
+           </div>`
+        : '';
+
+      return `<div class="t-item">
+        <div class="t-title">${escapeHtml(ev.label)}</div>
+        <div class="small">${tsStr}</div>
+        ${deltas}
+        ${extras}
+      </div>`;
+    }).join('');
+
+    const jsonHref = s.file_path || (fileBySessionId.get(s.session_id) || '');
+    const openBtn = jsonHref
+      ? `<a class="btn" href="${escapeHtml(jsonHref)}" target="_blank" rel="noopener noreferrer">JSON öffnen</a>`
+      : '';
+
+    const html = `
+      <div class="muted">Session</div>
+      <div class="small" style="word-break:break-all"><strong>${escapeHtml(s.session_id)}</strong></div>
+      <div class="small" style="margin:6px 0 10px">IP: <span class="pill">${escapeHtml(s.src_ip)}</span> ${openBtn?`&nbsp;&nbsp;${openBtn}`:''}</div>
+      <div class="timeline">${itemsHtml || '<div class="small muted">Keine Ereignisse vorhanden.</div>'}</div>
+    `;
+    detailContent.innerHTML = html;
+  }
+
+  async function initialLoad(){
+    const files = await listJsonFiles();
+    knownFiles = new Set(files);
+
+    const loads = await Promise.all(files.map(p => fetchJson(p)));
+    sessions = loads.map((s,idx) => s ? normalizeSession(s, files[idx]) : null)
+      .filter(Boolean)
+      .filter(s => s.session_id && (s.first_seen || s.first))
+      .sort((a,b)=> new Date(b.first_seen) - new Date(a.first_seen));
+
+    // render table
+    tableBody.innerHTML = '';
+    for(const s of sessions.slice(0, MAX_SHOW)){
+      const tr = document.createElement('tr');
+      tr.dataset.sessionId = s.session_id;
+      tr.innerHTML = rowHtml(s);
+      tr.addEventListener('click', () => showDetails(s));
+      tableBody.appendChild(tr);
     }
+    statusEl.textContent = `Stand: ${formatBerlin(new Date())}`;
+  }
 
-    listFiles();
-  </script>
+  async function checkForNewFiles(){
+    const files = await listJsonFiles();
+    const newOnes = files.filter(f => !knownFiles.has(f));
+    if(newOnes.length === 0){ statusEl.textContent = `Stand: ${formatBerlin(new Date())}`; return; }
+
+    for(const f of newOnes) knownFiles.add(f);
+
+    const loads = await Promise.all(newOnes.map(p => fetchJson(p)));
+    const newSessions = loads.map((s,idx)=> s ? normalizeSession(s, newOnes[idx]) : null)
+      .filter(Boolean)
+      .filter(s => s.session_id && (s.first_seen || s.first))
+      .sort((a,b)=> new Date(b.first_seen) - new Date(a.first_seen));
+
+    sessions = [...newSessions, ...sessions].sort((a,b)=> new Date(b.first_seen) - new Date(a.first_seen));
+
+    renderIncremental(newSessions);
+    statusEl.textContent = `Neu: ${newOnes.length} · Stand: ${formatBerlin(new Date())}`;
+  }
+
+  // boot
+  await initialLoad();
+  setInterval(checkForNewFiles, POLL_INTERVAL);
+})();
+</script>
 </body>
 </html>

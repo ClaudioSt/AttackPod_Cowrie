@@ -1,11 +1,28 @@
-:80
-
-root * /srv
-file_server browse
-
-# Explizite JSON-Auslieferung als text/json, nicht application/octet-stream
-@jsonfiles {
-    path *.json
+{
+    email {$WEB_MAIL:-admin@example.de}
 }
 
-header @jsonfiles Content-Type application/json
+# ===== HTTPS-Site unter deiner Domain =====
+{$WEB_DOMAIN} {
+    root * /srv
+    encode zstd gzip
+    file_server browse
+
+    # JSON korrekt ausliefern
+    @jsonfiles {
+        path *.json
+    }
+    header @jsonfiles Content-Type application/json
+
+    # Sicherheits-Header
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+}
+
+# ===== HTTP → HTTPS Redirect (Port 80 bleibt nur für ACME + Redirect offen) =====
+:80 {
+    redir https://{$WEB_DOMAIN}{uri} 308
+}
