@@ -7,6 +7,7 @@ services:
     volumes:
       - ./cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
       - ./cowrie/log:/cowrie/cowrie-git/var/log/cowrie
+      - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
     networks: [honeynet]
     restart: unless-stopped
 
