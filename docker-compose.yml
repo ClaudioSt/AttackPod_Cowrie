@@ -46,7 +46,7 @@ services:
       # Nur Daten binden – NICHT /app überschreiben!
       - ./data/pcap:/data/pcap:ro
       - ./data/out:/data/out
-      - ./cowrie/log:/cowrie/log:ro
+      - ./cowrie/log:/cowrie/cowrie-git/var/log/cowrie:ro
     depends_on:
       - cowrie
       - pcap-capture
