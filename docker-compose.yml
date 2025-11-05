@@ -33,19 +33,17 @@ services:
   extractor:
     build:
       context: ./extractor
-    container_name: extractor
-    dockerfile: Dockerfile
+      dockerfile: Dockerfile
     image: extractor:latest
+    container_name: extractor
     environment:
-      # SEND_URL absichtlich NICHT gesetzt -> kein Senden im Dauerlauf
       API_KEY: ${API_KEY}
       COWRIE_JSON: /cowrie/log/cowrie.json
       PCAP_DIR: /data/pcap
       OUT_DIR: /data/out
       SENSOR_ID: honeypot-01
     volumes:
-      - ./extractor/extractor.py:/opt/extractor/extractor.py:ro
-      - ./extractor/entrypoint.sh:/app/entrypoint.sh:ro
+      # Nur Daten binden – NICHT /app überschreiben!
       - ./data/pcap:/data/pcap:ro
       - ./data/out:/data/out
       - ./cowrie/log:/cowrie/log:ro
@@ -53,8 +51,8 @@ services:
       - cowrie
       - pcap-capture
     networks: [honeynet]
-    entrypoint: ["/usr/bin/tini","--","/bin/sh","-lc","exec /app/entrypoint.sh"]
     restart: unless-stopped
+
     # Default-CMD kommt aus extractor/entrypoint.sh (Loop, nur schreiben)
 
   session-trigger:
