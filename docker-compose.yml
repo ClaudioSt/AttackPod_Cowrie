@@ -88,8 +88,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "8080:80"
+      - "8443:443"
     volumes:
-      - ./web/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web/caddyfile:/etc/caddy/caddyfile:ro
       - ./data/out:/srv/data:ro
       - ./web/index.html:/srv/index.html:ro
       - caddy_data:/data
@@ -97,10 +99,11 @@ services:
     environment:
       ENABLE_WEB: ${ENABLE_WEB}
       WEB_DOMAIN: ${WEB_DOMAIN}
+      WEB_MAIL: ${WEB_MAIL}
     entrypoint:  >
       sh -lc '
         if [ "${ENABLE_WEB}" = "1" ]; then
-          exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile;
+          exec caddy run --config /etc/caddy/caddyfile --adapter caddyfile;
         else
           echo "ENABLE_WEB != 1 -> skipping web service" && sleep infinity;
         fi

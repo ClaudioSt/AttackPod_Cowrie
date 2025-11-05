@@ -2,19 +2,16 @@
     email {$WEB_MAIL:-admin@example.de}
 }
 
-# ===== HTTPS-Site unter deiner Domain =====
-{$WEB_DOMAIN} {
+(site_common) {
     root * /srv
     encode zstd gzip
     file_server browse
 
-    # JSON korrekt ausliefern
     @jsonfiles {
-        path *.json
+        path /data/*.json
     }
     header @jsonfiles Content-Type application/json
 
-    # Sicherheits-Header
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -22,7 +19,19 @@
     }
 }
 
-# ===== HTTP → HTTPS Redirect (Port 80 bleibt nur für ACME + Redirect offen) =====
-:80 {
-    redir https://{$WEB_DOMAIN}{uri} 308
+# Lokale Entwicklung (nur lokal, anderer Port)
+# HTTP:
+localhost:8080, 127.0.0.1:8080 {
+    import site_common
+}
+# Optional HTTPS intern:
+# localhost:8443, 127.0.0.1:8443 {
+#     tls internal
+#     import site_common
+# }
+
+# Produktion (öffentlich, 80/443)
+{$WEB_DOMAIN} {
+    import site_common
+    # tls { ... }  # optional ACME-Tuning
 }

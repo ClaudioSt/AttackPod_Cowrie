@@ -7,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 COWRIE_JSON = os.getenv("COWRIE_JSON", "/cowrie/log/cowrie.json")
 PCAP_DIR    = os.getenv("PCAP_DIR", "/data/pcap")
 OUT_DIR     = os.getenv("OUT_DIR", "/data/out")
-SENSOR_ID   = os.getenv("SENSOR_ID", "honeypot-01")
 SEND_URL    = os.getenv("SEND_URL", "http://host.docker.internal:8000/add_attack")
 API_KEY     = os.getenv("API_KEY", "supersecretsharedkey")
 EXTRACTOR_BIN = os.getenv("EXTRACTOR_BIN", "python /app/extractor.py")
@@ -68,7 +67,6 @@ def run_extractor_for(sid, sess):
         f" --pcap-dir {shlex.quote(PCAP_DIR)}"
         f" --cowrie-json {shlex.quote(COWRIE_JSON)}"
         f" --out-dir {shlex.quote(OUT_DIR)}"
-        f" --sensor-id {shlex.quote(SENSOR_ID)}"
         f" --send-url {shlex.quote(SEND_URL)}"
         f" --api-key {shlex.quote(API_KEY)}"
         f" --only-session {shlex.quote(sid)}"
