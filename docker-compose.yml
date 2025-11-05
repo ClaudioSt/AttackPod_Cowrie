@@ -34,6 +34,8 @@ services:
     build:
       context: ./extractor
     container_name: extractor
+    dockerfile: Dockerfile
+    image: extractor:latest
     environment:
       # SEND_URL absichtlich NICHT gesetzt -> kein Senden im Dauerlauf
       API_KEY: ${API_KEY}
@@ -51,6 +53,7 @@ services:
       - cowrie
       - pcap-capture
     networks: [honeynet]
+    entrypoint: ["/usr/bin/tini","--","/bin/sh","-lc","exec /app/entrypoint.sh"]
     restart: unless-stopped
     # Default-CMD kommt aus extractor/entrypoint.sh (Loop, nur schreiben)
 
