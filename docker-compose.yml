@@ -10,6 +10,8 @@ services:
       - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
     networks: [honeynet]
     restart: unless-stopped
+    environment:
+      - COWRIE_LOGDIR=/cowrie/cowrie-git/var/log/cowrie
 
   pcap-capture:
     image: nicolaka/netshoot:latest
@@ -35,6 +37,7 @@ services:
       context: ./extractor
       dockerfile: Dockerfile
     image: extractor:latest
+    user: "0:0"
     container_name: extractor
     environment:
       API_KEY: ${API_KEY}
