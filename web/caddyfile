@@ -32,6 +32,15 @@ localhost:8080, 127.0.0.1:8080 {
 
 # Produktion (öffentlich, 80/443)
 {$WEB_DOMAIN} {
+    @all path /*
+    basicauth @all {
+        realm "NetWatch"
+        Watcher $2a$14$jgoxo/E1xEB7Oz8jU1stMOT7gwa/8njZRaut4sCCthoAzv4FaepLO
+    }
+
+    root * /srv
+    encode zstd gzip
+    file_server browse
     import site_common
     # tls { ... }  # optional ACME-Tuning
 }
