@@ -177,6 +177,14 @@
     }
   }
 
+  function firstSeenDate(s){
+    const v = s.first_seen || s.first || s._collected_at || null;
+    return v ? new Date(v) : new Date(0); // Fallback = sehr alt
+  }
+  function cmpFirstSeenDesc(a,b){
+    return firstSeenDate(b) - firstSeenDate(a); // neueste zuerst
+  }
+
   function normalizeSession(s, filePath) {
     const first = s.first_seen || s.first || s._collected_at || null;
     const durationSec = typeof s.duration === 'number' ? s.duration : null;
@@ -303,7 +311,7 @@
     sessions = loads.map((s,idx) => s ? normalizeSession(s, files[idx]) : null)
       .filter(Boolean)
       .filter(s => s.session_id && (s.first_seen || s.first))
-      .sort((a,b)=> new Date(b.first_seen) - new Date(a.first_seen));
+      .sort(cmpFirstSeenDesc);
 
     // render table
     tableBody.innerHTML = '';
@@ -328,9 +336,9 @@
     const newSessions = loads.map((s,idx)=> s ? normalizeSession(s, newOnes[idx]) : null)
       .filter(Boolean)
       .filter(s => s.session_id && (s.first_seen || s.first))
-      .sort((a,b)=> new Date(b.first_seen) - new Date(a.first_seen));
+      .sort(cmpFirstSeenDesc);
 
-    sessions = [...newSessions, ...sessions].sort((a,b)=> new Date(b.first_seen) - new Date(a.first_seen));
+    sessions = [...newSessions, ...sessions].sort(cmpFirstSeenDesc);
 
     renderIncremental(newSessions);
     statusEl.textContent = `Neu: ${newOnes.length} · Stand: ${formatBerlin(new Date())}`;
