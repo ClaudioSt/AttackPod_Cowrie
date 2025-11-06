@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
 extractor.py
-
-Produces ONE JSON summary per Cowrie session and either writes it to out_dir
-or POSTs it (NDJSON, signed) to a collector.
-
-Usage examples:
-  python extractor.py --only-session 00c09e5b58af --pcap-dir /data/pcap --cowrie-json /cowrie/log/cowrie.json --send-url http://host.docker.internal:8000/add_attack --api-key supersecret
+Erzeugt pro Cowrie-Session genau eine JSON-Zusammenfassung.
+Kann optional per --send-url NDJSON posten und per --use-tshark echtes KEX/HASSH aus PCAP extrahieren.
 """
 from __future__ import annotations
-import os, sys, json, time, argparse, hmac, hashlib, math
-from datetime import datetime, timezone
+import os, sys, json, time, argparse, hmac, hashlib, math, subprocess, shutil
+from datetime import datetime, timezone, timedelta
 from statistics import mean, median
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -21,13 +17,11 @@ except Exception as e:
     print("ERROR: scapy not available. Install scapy in the image.", file=sys.stderr)
     raise
 
-# ---------- Helpers ----------
 ISOFMT = "%Y-%m-%dT%H:%M:%S"
 
 def isoparse(s: str) -> Optional[datetime]:
     if not s: return None
     try:
-        # accept trailing Z
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         return datetime.fromisoformat(s).astimezone(timezone.utc)
@@ -57,13 +51,11 @@ def read_cowrie_events(cowrie_json_path: str) -> List[Dict[str,Any]]:
                 try:
                     evs.append(json.loads(ln))
                 except Exception:
-                    # ignored malformed line
                     continue
     except FileNotFoundError:
         return []
     return evs
 
-# ---------- Group by session ----------
 def group_by_session(events: List[Dict[str,Any]]) -> Dict[str, List[Dict[str,Any]]]:
     sessions = {}
     for e in events:
@@ -72,15 +64,10 @@ def group_by_session(events: List[Dict[str,Any]]) -> Dict[str, List[Dict[str,Any
         sessions.setdefault(sid, []).append(e)
     return sessions
 
-# ---------- Select pcap files by time-window or simple heuristics ----------
+# ---------- PCAP helpers ----------
 def list_pcaps(pcap_dir: str) -> List[str]:
-    files = []
-    if not os.path.isdir(pcap_dir):
-        return files
-    for fn in sorted(os.listdir(pcap_dir)):
-        if fn.endswith(".pcap"):
-            files.append(os.path.join(pcap_dir,fn))
-    return files
+    if not os.path.isdir(pcap_dir): return []
+    return [os.path.join(pcap_dir,fn) for fn in sorted(os.listdir(pcap_dir)) if fn.endswith(".pcap")]
 
 def pcap_mtime(path: str) -> float:
     return os.path.getmtime(path)
@@ -88,30 +75,21 @@ def pcap_mtime(path: str) -> float:
 def pcap_size(path: str) -> int:
     return os.path.getsize(path)
 
-# ---------- Flow filter: returns True if packet belongs to flow  -->
 def packet_belongs_to_flow(pkt, flow_tuple):
-    # flow_tuple: (src, sport, dst, dport) strings/ints
     try:
         if not (IP in pkt and TCP in pkt):
             return False
-        ip = pkt[IP]
-        tcp = pkt[TCP]
-        src = ip.src; dst = ip.dst
-        sport = int(tcp.sport); dport = int(tcp.dport)
+        ip = pkt[IP]; tcp = pkt[TCP]
         s0, sp0, d0, dp0 = flow_tuple
-        # Compare both directions
-        if (src==s0 and sport==int(sp0) and dst==d0 and dport==int(dp0)) or (src==d0 and sport==int(dp0) and dst==s0 and dport==int(sp0)):
+        # beide Richtungen akzeptieren
+        if (ip.src==s0 and int(tcp.sport)==int(sp0) and ip.dst==d0 and int(tcp.dport)==int(dp0)) \
+           or (ip.src==d0 and int(tcp.sport)==int(dp0) and ip.dst==s0 and int(tcp.dport)==int(sp0)):
             return True
     except Exception:
         return False
     return False
 
-# ---------- Basic PCAP/flow analysis ----------
 def analyze_pcap_for_session(pcap_path: str, flow: Optional[Tuple[str,int,str,int]]) -> Dict[str,Any]:
-    """
-    Gather simple metrics from pcap for given flow (if flow None, analyze all TCP/SSH packets)
-    returns metrics dict (may be empty if pcap unreadable)
-    """
     out = {}
     try:
         pkts = rdpcap(pcap_path)
@@ -119,7 +97,6 @@ def analyze_pcap_for_session(pcap_path: str, flow: Optional[Tuple[str,int,str,in
         out["_pcap_error"] = str(e)
         return out
 
-    # pick packets that are TCP (and part of flow if given)
     sel = []
     for p in pkts:
         if IP in p and TCP in p:
@@ -127,12 +104,10 @@ def analyze_pcap_for_session(pcap_path: str, flow: Optional[Tuple[str,int,str,in
                 if packet_belongs_to_flow(p, flow):
                     sel.append(p)
             else:
-                # heuristics: consider tcp packets to or from port 22/2222
                 tcp = p[TCP]
                 if tcp.sport in (22,2222) or tcp.dport in (22,2222):
                     sel.append(p)
     if not sel:
-        # fallback: all TCP
         sel = [p for p in pkts if IP in p and TCP in p]
     if not sel:
         return out
@@ -140,34 +115,24 @@ def analyze_pcap_for_session(pcap_path: str, flow: Optional[Tuple[str,int,str,in
     times = [float(p.time) for p in sel]
     times.sort()
     first_ts = times[0]; last_ts = times[-1]
-    duration = last_ts - first_ts if last_ts>first_ts else 0.0
+    duration = max(0.0, last_ts - first_ts)
     packet_count = len(sel)
     total_bytes = sum(len(bytes(p)) for p in sel)
 
-    # IATs
     iats = [t2 - t1 for t1,t2 in zip(times,times[1:])] if len(times)>1 else []
     iat_mean = mean(iats) if iats else 0.0
     iat_median = median(iats) if iats else 0.0
 
-    # TTL, window median
-    ttls = []
-    wins = []
-    flags_counts = {}
-    seq_seen = {}
-    retrans = 0
-    tcp_options = None
+    ttls, wins, flags_counts, seq_seen = [], [], {}, {}
+    retrans, tcp_options = 0, None
     for p in sel:
         ip = p[IP]; tcp = p[TCP]
-        ttls.append(ip.ttl if hasattr(ip,'ttl') else None)
-        wins.append(tcp.window if hasattr(tcp,'window') else None)
-        fl = str(tcp.flags)
-        flags_counts[fl] = flags_counts.get(fl,0) + 1
+        if hasattr(ip,'ttl'): ttls.append(ip.ttl)
+        if hasattr(tcp,'window'): wins.append(tcp.window)
+        fl = str(tcp.flags); flags_counts[fl] = flags_counts.get(fl,0) + 1
         seq = (ip.src, tcp.sport, ip.dst, tcp.dport, tcp.seq)
-        if seq in seq_seen:
-            retrans += 1
-        else:
-            seq_seen[seq] = True
-        # options from first SYN
+        if seq in seq_seen: retrans += 1
+        else: seq_seen[seq] = True
         if tcp.flags & 0x02:  # SYN
             opts = []
             try:
@@ -176,14 +141,12 @@ def analyze_pcap_for_session(pcap_path: str, flow: Optional[Tuple[str,int,str,in
                         opts.append((o[0], o[1]))
                     else:
                         opts.append(o)
-                if opts:
-                    tcp_options = opts
+                if opts: tcp_options = opts
             except Exception:
                 pass
 
-    # clean median calculations
-    ttls_clean = [t for t in ttls if isinstance(t,int) or isinstance(t,float)]
-    wins_clean = [w for w in wins if isinstance(w,int) or isinstance(w,float)]
+    ttls_clean = [t for t in ttls if isinstance(t,(int,float))]
+    wins_clean = [w for w in wins if isinstance(w,(int,float))]
 
     out.update({
         "packet_count": packet_count,
@@ -199,41 +162,91 @@ def analyze_pcap_for_session(pcap_path: str, flow: Optional[Tuple[str,int,str,in
     })
     return out
 
+# ---------- KEX/HASSH via tshark (optional) ----------
+def tshark_path() -> Optional[str]:
+    return shutil.which("tshark")
+
+def extract_kex_with_tshark(pcap_path: str) -> Optional[Dict[str,Any]]:
+    tsh = tshark_path()
+    if not tsh: return None
+    fields = [
+        "ssh.kex_algorithms",
+        "ssh.host_key_algorithms",
+        "ssh.encryption_algorithms_client_to_server",
+        "ssh.encryption_algorithms_server_to_client",
+        "ssh.mac_algorithms_client_to_server",
+        "ssh.mac_algorithms_server_to_client",
+        "ssh.compression_algorithms_client_to_server",
+        "ssh.compression_algorithms_server_to_client",
+        "ssh.protocol"
+    ]
+    cmd = [tsh, "-r", pcap_path, "-Y", "ssh", "-T", "fields"]
+    for f in fields:
+        cmd += ["-e", f]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if res.returncode != 0: return None
+        # parse: last non-empty line tends to hold KEXINIT
+        lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
+        if not lines: return None
+        last = lines[-1].split("\t")
+        # map fields
+        vals = dict(zip(fields, last))
+        # Build HASSH-style input (Salesforce: concat lists in defined order)
+        def clean(v): return (v or "").strip()
+        kex = clean(vals.get("ssh.kex_algorithms"))
+        hka = clean(vals.get("ssh.host_key_algorithms"))
+        c2s = clean(vals.get("ssh.encryption_algorithms_client_to_server"))
+        s2c = clean(vals.get("ssh.encryption_algorithms_server_to_client"))
+        mc2s = clean(vals.get("ssh.mac_algorithms_client_to_server"))
+        ms2c = clean(vals.get("ssh.mac_algorithms_server_to_client"))
+        cc2s = clean(vals.get("ssh.compression_algorithms_client_to_server"))
+        cs2c = clean(vals.get("ssh.compression_algorithms_server_to_client"))
+        hassh_algostr = ";".join([kex,hka,c2s,s2c,mc2s,ms2c,cc2s,cs2c])
+        hassh = hashlib.md5(hassh_algostr.encode("utf-8")).hexdigest() if hassh_algostr.replace(";","") else None
+        return {
+            "kex_algorithms": kex or None,
+            "host_key_algorithms": hka or None,
+            "ciphers_c2s": c2s or None,
+            "ciphers_s2c": s2c or None,
+            "macs_c2s": mc2s or None,
+            "macs_s2c": ms2c or None,
+            "comps_c2s": cc2s or None,
+            "comps_s2c": cs2c or None,
+            "hasshAlgorithms": hassh_algostr or None,
+            "hassh": hassh
+        }
+    except Exception:
+        return None
+
 # ---------- Build session summary ----------
 def build_session_summary(session_id: str, events: List[Dict[str,Any]], pcap_dir: str,
                           flow: Optional[Tuple[str,int,str,int]] = None, time_window: Optional[Tuple[datetime,datetime]] = None,
-                          sensor_id: str = "") -> Dict[str,Any]:
-    # basic fields
-    # choose earliest and latest timestamps from events
+                          sensor_id: str = "", use_tshark: bool=False) -> Dict[str,Any]:
+
+    # Zeiten
     times = []
     for e in events:
         t = e.get("timestamp") or e.get("time") or e.get("ts")
         dt = isoparse(t) if t else None
-        if dt:
-            times.append(dt)
+        if dt: times.append(dt)
     first_seen = min(times).isoformat() if times else None
-    last_seen = max(times).isoformat() if times else None
+    last_seen  = max(times).isoformat() if times else None
 
-    # gather login attempts
+    # Login-Versuche
     attempts = []
     for e in events:
-        if e.get("eventid") and e.get("eventid").startswith("cowrie.login"):
+        if e.get("eventid","").startswith("cowrie.login"):
             attempts.append({
                 "username": e.get("username"),
                 "password": e.get("password"),
                 "timestamp": e.get("timestamp") or e.get("time")
             })
 
-    # kex / client banners
-    client_banner = None
-    server_banner = None
-    hassh = None
-    hasshAlgorithms = None
-    kex_algorithms = None
-    ciphers = None
-    macs = None
-    comps = None
-
+    # Banner & KEX (aus Cowrie, falls vorhanden)
+    client_banner = server_banner = None
+    hassh = hasshAlgorithms = None
+    kex_algorithms = ciphers = macs = comps = None
     for e in events:
         if e.get("eventid") == "cowrie.client.version" and not client_banner:
             client_banner = e.get("version")
@@ -247,8 +260,8 @@ def build_session_summary(session_id: str, events: List[Dict[str,Any]], pcap_dir
             macs = e.get("macCS") or macs
             comps = e.get("compCS") or comps
 
-    # choose IP/ports from events (session.connect)
-    src_ip = None; src_port = None; dst_ip = None; dst_port = None
+    # Flow (aus session.connect)
+    src_ip = src_port = dst_ip = dst_port = None
     for e in events:
         if e.get("eventid") == "cowrie.session.connect":
             src_ip = e.get("src_ip") or src_ip
@@ -256,45 +269,50 @@ def build_session_summary(session_id: str, events: List[Dict[str,Any]], pcap_dir
             dst_ip = e.get("dst_ip") or dst_ip
             dst_port = e.get("dst_port") or dst_port
 
-    # choose PCAP files to inspect:
+    # PCAP-Auswahl (Time-Window berücksichtigen)
     pcaps = list_pcaps(pcap_dir)
     candidate_pcaps = []
-    # Heuristics: take pcaps with non-zero size, and if flow defined, prefer ones with mtime in window
-    for p in pcaps:
-        try:
-            if pcap_size(p) < 64: continue
-        except Exception:
-            continue
-        if time_window:
-            # include if file mtime intersects window +/- 5s
-            mt = datetime.fromtimestamp(pcap_mtime(p), tz=timezone.utc)
-            if mt >= time_window[0] - time.timedelta(seconds=5) and mt <= time_window[1] + time.timedelta(seconds=5):
-                candidate_pcaps.append(p)
-        else:
-            candidate_pcaps.append(p)
-    # fallback: include all
+    if time_window and all(time_window):
+        start, end = time_window
+        for p in pcaps:
+            try:
+                if pcap_size(p) < 64: continue
+                mt = datetime.fromtimestamp(pcap_mtime(p), tz=timezone.utc)
+                if (mt >= start - timedelta(seconds=15)) and (mt <= end + timedelta(seconds=15)):
+                    candidate_pcaps.append(p)
+            except Exception:
+                continue
     if not candidate_pcaps:
         candidate_pcaps = pcaps
 
-    # If we have flow, analyze each pcap for that flow; otherwise pick most recent non-empty pcap
     pcap_metrics = {}
     chosen_pcap = None
     if flow:
         for p in reversed(candidate_pcaps):
             m = analyze_pcap_for_session(p, flow)
-            # prefer ones with packet_count > 0
             if m.get("packet_count",0) > 0:
-                pcap_metrics = m
-                chosen_pcap = p
-                break
+                pcap_metrics = m; chosen_pcap = p; break
     else:
-        # try most recent first
         for p in reversed(candidate_pcaps):
             m = analyze_pcap_for_session(p, None)
             if m.get("packet_count",0) > 0:
-                pcap_metrics = m
-                chosen_pcap = p
-                break
+                pcap_metrics = m; chosen_pcap = p; break
+
+    # Wenn kein hassh in Events und tshark gewünscht/verfügbar: aus PCAP ziehen
+    kex_from_pcap = None
+    if (not hassh) and use_tshark and chosen_pcap:
+        kex_from_pcap = extract_kex_with_tshark(chosen_pcap)
+        if kex_from_pcap:
+            hassh = hassh or kex_from_pcap.get("hassh")
+            hasshAlgorithms = hasshAlgorithms or kex_from_pcap.get("hasshAlgorithms")
+            # fülle Felder, falls leer
+            kex_algorithms = kex_algorithms or kex_from_pcap.get("kex_algorithms")
+            if not ciphers:
+                ciphers = (kex_from_pcap.get("ciphers_c2s") or "") + "|" + (kex_from_pcap.get("ciphers_s2c") or "")
+            if not macs:
+                macs = (kex_from_pcap.get("macs_c2s") or "") + "|" + (kex_from_pcap.get("macs_s2c") or "")
+            if not comps:
+                comps = (kex_from_pcap.get("comps_c2s") or "") + "|" + (kex_from_pcap.get("comps_s2c") or "")
 
     summary = {
         "session_id": session_id,
@@ -315,23 +333,19 @@ def build_session_summary(session_id: str, events: List[Dict[str,Any]], pcap_dir
         "hasshAlgorithms": hasshAlgorithms,
         "hassh": hassh,
         "login_attempts": attempts,
-        "fingerprint_sources": ["hassh","client_banner","tcp_options"],
+        "fingerprint_sources": ["hassh","client_banner","tcp_options"] + (["tshark"] if kex_from_pcap else []),
         "pcap_path": chosen_pcap,
     }
-    # merge pcap_metrics
     summary.update(pcap_metrics)
     return summary
 
 def _to_jsonable(x):
-    """Recursively convert objects to JSON-serializable types."""
     from datetime import datetime
     if x is None or isinstance(x, (str, int, float, bool)):
-        # floats: NaN/Inf sind formal kein JSON; werte ggf. in str umwandeln
         if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
             return str(x)
         return x
     if isinstance(x, bytes):
-        # kompakt: Hex-String (lesbar, stabil)
         return x.hex()
     if isinstance(x, (list, tuple, set)):
         return [_to_jsonable(v) for v in x]
@@ -339,14 +353,11 @@ def _to_jsonable(x):
         return {str(k): _to_jsonable(v) for k, v in x.items()}
     if isinstance(x, datetime):
         return x.isoformat()
-    # Scapy-Objekte o.ä.
     try:
         return str(x)
     except Exception:
         return "<unserializable>"
 
-
-# ---------- Send NDJSON single-line ----------
 def send_ndjson(obj: Dict[str,Any], send_url: str, api_key: Optional[str]=None) -> Tuple[bool,int,str]:
     payload = (json.dumps(_to_jsonable(obj), separators=(",",":")) + "\n").encode("utf-8")
     import requests
@@ -355,11 +366,10 @@ def send_ndjson(obj: Dict[str,Any], send_url: str, api_key: Optional[str]=None) 
         headers["X-Payload-Signature"] = "v1=" + hmac_sig(api_key, payload)
     try:
         r = requests.post(send_url, data=payload, headers=headers, timeout=10)
-        return (r.ok, r.status_code, r.text if r.text else "")
+        return (r.ok, r.status_code, r.text or "")
     except Exception as e:
         return (False, 0, str(e))
 
-# ---------- Argparse and main ----------
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--pcap-dir", default=os.getenv("PCAP_DIR","/data/pcap"))
@@ -370,13 +380,14 @@ def parse_args():
     p.add_argument("--flow", default=None, help='SRC:SPORT->DST:DPORT (optional)')
     p.add_argument("--send-url", default=os.getenv("SEND_URL",""))
     p.add_argument("--api-key", default=os.getenv("API_KEY",""))
+    p.add_argument("--use-tshark", action="store_true", help="Use tshark to extract KEX/HASSH from PCAP if Cowrie lacks it")
     return p.parse_args()
 
 def main():
     args = parse_args()
     events = read_cowrie_events(args.cowrie_json)
     sessions = group_by_session(events)
-    # time window parse
+
     tw = None
     if args.time_window:
         try:
@@ -384,11 +395,10 @@ def main():
             tw = (isoparse(a), isoparse(b))
         except Exception:
             tw = None
-    # flow parse
+
     flow = None
     if args.flow:
         try:
-            # format: "1.2.3.4:1234->5.6.7.8:2222"
             left,right = args.flow.split("->")
             s,sport = left.split(":")
             d,dport = right.split(":")
@@ -396,35 +406,25 @@ def main():
         except Exception:
             flow = None
 
-    # sensor id
     sensor_id = os.getenv("SENSOR_ID","")
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    # ensure out dir
-    try:
-        os.makedirs(args.out_dir, exist_ok=True)
-    except Exception:
-        pass
-
-    # process one session (if provided) or all sessions
     target_sessions = [args.only_session] if args.only_session else sorted(sessions.keys())
     processed = 0
     for sid in target_sessions:
         if sid is None: continue
         evs = sessions.get(sid, [])
-        if not evs:
-            # nothing to do
-            continue
-        summary = build_session_summary(sid, evs, args.pcap_dir, flow=flow, time_window=tw, sensor_id=sensor_id)
-        # put timestamp
+        if not evs: continue
+        summary = build_session_summary(sid, evs, args.pcap_dir, flow=flow, time_window=tw, sensor_id=sensor_id, use_tshark=args.use_tshark)
         summary["_collected_at"] = now_iso()
-        # write to out dir as pretty json (for debugging)
+
         outpath = os.path.join(args.out_dir, f"session-{sid}.json")
         try:
             with open(outpath,"w",encoding="utf-8") as fh:
                 json.dump(_to_jsonable(summary), fh, indent=2, ensure_ascii=False)
         except Exception as e:
             print("Warning: cannot write out file:", e, file=sys.stderr)
-        # send if configured
+
         if args.send_url:
             ok, status, text = send_ndjson(summary, args.send_url, args.api_key or None)
             if ok:
@@ -432,7 +432,6 @@ def main():
             else:
                 print(f"POST failed -> {args.send_url} (status {status}) error: {text}", file=sys.stderr)
         else:
-            # fallback: print NDJSON to stdout
             print(json.dumps(_to_jsonable(summary), separators=(",",":")))
         processed += 1
 
