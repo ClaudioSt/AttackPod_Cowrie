@@ -107,8 +107,9 @@ def analyze_pcap_for_session(pcap_path: str, flow: Optional[Tuple[str,int,str,in
                 tcp = p[TCP]
                 if tcp.sport in (22,2222) or tcp.dport in (22,2222):
                     sel.append(p)
-    if not sel:
-        sel = [p for p in pkts if IP in p and TCP in p]
+    # Kein Blind-Fallback auf alle TCP-Pakete: passt der Flow zu keinem Paket,
+    # liefern wir lieber leere Metriken zurück, als Pakete fremder Sessions
+    # einzurechnen (würde packet_count/bytes/duration/ttl_median verfälschen).
     if not sel:
         return out
 
