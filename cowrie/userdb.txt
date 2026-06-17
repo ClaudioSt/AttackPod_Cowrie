@@ -1,0 +1,25 @@
+# Cowrie userdb – steuert, welche Login-Kombinationen akzeptiert werden.
+# Format:  <username>:x:<password>
+#   *           -> beliebiges Passwort akzeptieren
+#   !<wert>     -> diesen Wert explizit ablehnen
+#   <wert>      -> nur exakt diesen Wert akzeptieren
+# Reihenfolge zaehlt: speziellere Regeln nach oben, Wildcards nach unten.
+# Ziel: genug Logins zulassen, damit Post-Auth-Verhalten (Kommandos,
+# Downloads) erfasst wird – aber nicht jeden Versuch trivial durchwinken.
+
+# root: triviale Passwoerter ablehnen, sonst alles zulassen
+root:x:!root
+root:x:!123456
+root:x:!password
+root:x:*
+
+# haeufig gescannte Service-Accounts: beliebiges Passwort akzeptieren
+admin:x:*
+oracle:x:*
+ubuntu:x:*
+pi:x:*
+test:x:*
+user:x:*
+
+# Fallback: jeder andere Benutzer mit beliebigem Passwort
+*:x:*

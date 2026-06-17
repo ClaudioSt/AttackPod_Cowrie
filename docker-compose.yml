@@ -32,35 +32,12 @@ services:
     networks: [honeynet]
     restart: unless-stopped
 
-  extractor:
-    build:
-      context: ./extractor
-      dockerfile: Dockerfile
-    image: extractor:latest
-    user: "0:0"
-    container_name: extractor
-    environment:
-      API_KEY: ${API_KEY}
-      COWRIE_JSON: /cowrie/log/cowrie.json
-      PCAP_DIR: /data/pcap
-      OUT_DIR: /data/out
-      SENSOR_ID: honeypot-01
-    volumes:
-      # Nur Daten binden – NICHT /app überschreiben!
-      - ./data/pcap:/data/pcap:ro
-      - ./data/out:/data/out
-      - ./cowrie/log:/cowrie/cowrie-git/var/log/cowrie:ro
-    depends_on:
-      - cowrie
-      - pcap-capture
-    networks: [honeynet]
-    restart: unless-stopped
-
-    # Default-CMD kommt aus extractor/entrypoint.sh (Loop, nur schreiben)
-
+  # session-trigger überwacht cowrie.json und ruft pro Session-Ende
+  # extractor.py auf (schreibt JSON nach /data/out und postet optional an SEND_URL).
   session-trigger:
     build:
       context: ./extractor
+    image: extractor:latest
     container_name: session-trigger
     environment:
       API_KEY: ${API_KEY}

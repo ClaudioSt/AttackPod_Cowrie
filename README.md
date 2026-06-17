@@ -60,10 +60,9 @@ docker compose up -d
 
 Dies startet:
 - den **Cowrie-Honeypot**
-- den **Extractor** (Python-Service zur Auswertung)
-- den **Trigger-Prozess** (überwacht Sessions)
+- den **pcap-capture**-Dienst (tcpdump auf Port 2222)
+- den **session-trigger** (überwacht Sessions und ruft pro Session-Ende `extractor.py` auf)
 - den **Caddy-Webserver** (Dashboard)
-- den **Healthcheck**
 
 ---
 
@@ -152,40 +151,43 @@ Diese Herangehensweise wurde inspiriert durch aktuelle Forschungsarbeiten wie:
 {
   "session_id": "abc123",
   "src_ip": "<REDACTED_IP>",
-  "sensor_id": "honeypot-01",
+  "src_port": 51542,
+  "dst_ip": "<REDACTED_IP>",
+  "dst_port": 2222,
   "protocol": "ssh",
-  "first_seen": "2025-10-30T21:47:38Z",
+  "first_seen": "2025-10-30T21:47:38+00:00",
+  "last_seen": "2025-10-30T21:47:45+00:00",
+  "sensor_id": "honeypot-01",
   "client_banner": "SSH-2.0-OpenSSH_for_Windows_9.5",
-  "kex_algorithms": [
-    "curve25519-sha256",
-    "ecdh-sha2-nistp256",
-    "diffie-hellman-group14-sha256",
-    ...
-  ],
-  "ciphers": [
-    "chacha20-poly1305@openssh.com",
-    "aes128-ctr",
-    ...
-  ],
-  "macs": [
-    "hmac-sha2-256-etm@openssh.com",
-    ...
-  ],
+  "server_banner": "SSH-2.0-OpenSSH_8.0",
+  "kex_algorithms": "curve25519-sha256,ecdh-sha2-nistp256,diffie-hellman-group14-sha256",
+  "ciphers": "chacha20-poly1305@openssh.com,aes128-ctr",
+  "macs": "hmac-sha2-256-etm@openssh.com",
+  "comps": "none,zlib@openssh.com",
+  "hasshAlgorithms": "<REDACTED>",
   "hassh": "<REDACTED_HASH>",
-  "tcp_meta": {
-    "ttl_median": 64,
-    "tcp_window_median": 64240,
-    "tcp_options": ["MSS", "SAckOK", "Timestamp", "WScale"]
-  },
   "login_attempts": [
-    {"username": "<REDACTED>", "timestamp": "2025-10-30T21:47:41Z"}
+    {"username": "<REDACTED>", "password": "<REDACTED>", "timestamp": "2025-10-30T21:47:41Z"}
   ],
+  "fingerprint_sources": ["hassh", "client_banner", "tcp_options"],
+  "pcap_path": "/data/pcap/ssh-20251030-214700.pcap",
   "packet_count": 4,
   "bytes": 296,
   "duration": 6.9,
-  ...
+  "iat_mean": 1.72,
+  "iat_median": 0.004,
+  "ttl_median": 64,
+  "tcp_window_median": 64240,
+  "tcp_options": [["MSS", 1460], "SAckOK", ["Timestamp", [123, 0]], ["WScale", 7]],
+  "tcp_flag_counts": {"S": 1, "SA": 1, "A": 2},
+  "retransmissions": 0,
+  "_collected_at": "2025-10-30T21:47:46+00:00"
 }
 ```
+
+> Hinweis: `kex_algorithms`, `ciphers`, `macs` und `comps` werden als
+> kommaseparierte Strings (so wie Cowrie sie liefert) gespeichert, nicht als
+> JSON-Arrays.
 
 Diese Struktur erlaubt sowohl **statistische Auswertung** als auch **Threat-Correlation** (z. B. Clustering ähnlicher Fingerprints).
 
